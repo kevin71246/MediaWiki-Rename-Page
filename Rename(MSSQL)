@@ -1,0 +1,89 @@
+USE [Wiki]
+DECLARE @current_page_title nvarchar(max), @new_page_title nvarchar(max), @parent_page_title nvarchar(max), @namespace int
+-- SPECIFY THESE (3) Values
+-- Use "_" for spaces
+SET @current_page_title = '11628_Kilbourn,_Alsip3'
+SET @new_page_title = '11628_Kilbourn,_Alsip'
+SET @namespace = 0
+-------------------------------------------------------------------
+DECLARE @TranCount int, @SuccessCount int,@FailureCount int,@Error int,@StartTime datetime
+SELECT @StartTime = GetDate()
+SELECT @TranCount=@@TRANCOUNT
+Set @SuccessCount=0
+Set @FailureCount=0
+DECLARE @PropertyId int
+-------------------------------------------------------------------
+--Setup cursor to loop through each analysis
+SET NOCOUNT ON;
+DECLARE cursor1 CURSOR FOR
+	---------------------------------------------------------------
+	--Get list of parent(s) for @current_page_title
+	---------------------------------------------------------------
+	SELECT page_title 'Parent_page_title'
+	FROM ( 
+		SELECT TOP 1000 pl_from, rd_from, pl_title 'RequestingPage'
+		FROM [pagelinks] 
+		LEFT JOIN [redirect] ON ((rd_from = pl_from) AND rd_title = @current_page_title AND (rd_interwiki = '' OR rd_interwiki IS NULL) AND rd_namespace = '0') 
+		INNER JOIN [page] ON ((pl_from = page_id))   
+		WHERE pl_namespace = '0' AND pl_title = @current_page_title AND (pl_from_namespace = '0')  
+		ORDER BY pl_from ) [temp_backlink_range] 
+	INNER JOIN [page] ON ((pl_from = page_id))    
+	---------------------------------------------------------------
+OPEN cursor1
+FETCH NEXT FROM cursor1 INTO @parent_page_title
+WHILE @@FETCH_STATUS = 0
+BEGIN
+	---------------------------------------------------------------
+	--Setup try/catch so we can rollback if any errors
+	BEGIN TRY
+		BEGIN TRANSACTION 
+		---------------------------------------------------------------
+		--Update Parent page links with new name
+		--SELECT top 1 @current_page_title OldPage, @new_page_title NewPage, @parent_page_title ParentPage, old_id, old_text, Replace(old_text, '[['+@current_page_title+']]', '[['+@new_page_title+']]') FROM Text WHERE old_id = (
+		--SELECT top 1 @current_page_title OldPage, @new_page_title NewPage, @parent_page_title ParentPage, old_id, old_text, Replace(old_text, '[['+Replace(@current_page_title,'_',' ')+']]', '[['+Replace(@new_page_title,'_',' ')+']]') FROM Text WHERE old_id = (
+		--Update Text SET old_text = Replace(old_text, '[['+@current_page_title+']]', '[['+@new_page_title+']]') WHERE old_id = (
+		Update Text SET old_text = Replace(old_text, '[['+Replace(@current_page_title,'_',' ')+']]', '[['+Replace(@new_page_title,'_',' ')+']]') WHERE old_id = (
+			SELECT slot_content_id
+			FROM Page p
+			JOIN Slots s ON p.page_latest=s.slot_revision_id
+			JOIN TEXT t ON s.slot_content_id=t.old_id
+			WHERE Page_title=@parent_page_title and page_namespace=@namespace
+		)
+		---------------------------------------------------------------
+		Set @Successcount=@Successcount+1
+		COMMIT
+	END TRY
+	BEGIN CATCH
+		Print 'Error:'
+		IF @@TRANCOUNT > 0
+			ROLLBACK
+		Declare @errMsg varchar(2000);
+		Set @errMsg = ERROR_MESSAGE();
+		RAISERROR(@errMsg, 16, 0)
+		Set @FailureCount=@FailureCount+1
+	END CATCH
+	---------------------------------------------------------------
+FETCH NEXT FROM cursor1 INTO @parent_page_title
+--Close out cursor
+END
+CLOSE cursor1
+DEALLOCATE cursor1
+--Report on success or failure
+SELECT @SuccessCount as 'Pages fixed',@FailureCount as 'Failed'
+IF (@SuccessCount=0 and @FailureCount=0)
+	BEGIN
+		print 'Nothing happened!  Likely your SELECT query yields no results.'
+		print ERROR_MESSAGE();
+		Set @errMsg = ERROR_MESSAGE();
+		RAISERROR(@errMsg, 16, 0)
+	END
+ELSE
+	BEGIN
+		--If previous succeeded, update main page title
+		--SELECT * FROM Page WHERE page_title=@current_page_title
+		UPDATE Page SET page_title=@new_page_title WHERE page_title=@current_page_title
+		UPDATE Redirect SET rd_title=@new_page_title WHERE rd_title=@current_page_title
+		UPDATE PageLinks SET pl_title=@new_page_title WHERE pl_title=@current_page_title
+	END
+--Clear Page Cache
+DELETE FROM Objectcache
